@@ -16,28 +16,45 @@ from matplotlib import patches
 import numpy as np
 import io
 from lz.reversal import reverse
-from pytz import timezone
 from twscrape import API, gather
 from twscrape.logger import set_log_level
-import urllib.request
 import re
 from collections import defaultdict
+from PIL import Image
+import csv
+import aiohttp
+import math
+import pandas as pd
+from datetime import timezone, timedelta
+from asyncio import run_coroutine_threadsafe
 
 dotenv_path = find_dotenv()
 load_dotenv(dotenv_path)
-
+# bot token and twitter account info
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TWITTER_USERNAME = os.getenv("TWITTER_USERNAME")
 TWITTER_EMAIL = os.getenv("TWITTER_EMAIL")
 TWITTER_PASSWORD = os.getenv("TWITTER_PASSWORD")
 TWITTER_EMAIL_PASSWORD = os.getenv("TWITTER_EMAIL_PASSWORD")
 # current server: egirls
-ACTIVE_SERVER = 468638089359785984
+ACTIVE_SERVER = os.getenv("ACTIVE_SERVER")
+# fun little file paths
 MESSAGE_FILE_PATH = 'message_history.json'
 TWEET_FILE_PATH = 'tweet_storage.json'
 TWEET_ID_FILE_PATH = 'tweet_id_storage.json'
 DELETED_BOT_MESSAGES_FILE_PATH = 'deleted_bot_history.json'
 COMMAND_HISTORY_FILE_PATH = 'command_history.json'
+# music file paths
+NIGHTCORE = ["nightcore/clarity.mp3", "nightcore/godisagirl.mp3", "nightcore/shatterme.mp3", "nightcore/takeahint.mp3"]
+NIGHTCORE_NAMES = ["Nightcore - Clarity", "Nightcore - God is a Girl", "Nightstep - Shatter Me", "Nightcore - Take a Hint"]
+# music globals
+SELECTED_SONGS = None
+SELECTED_SONG_NAMES = None
+CURRENT_SONG = None
+CURRENT_SONG_NAME = None
+
+# proxy
+proxy = os.getenv("PROXY")
 
 # slash commands setup
 discord.VoiceClient.warn_nacl = False
@@ -50,8 +67,6 @@ tree = app_commands.CommandTree(client)
 async def on_ready():
     await tree.sync(guild=discord.Object(id=ACTIVE_SERVER))
     print("bot is ready")
-    # channel = client.get_channel(1261771365539909674)
-    # await channel.send("bot is ready")
 
 # -- MYCOMMAND --
 
@@ -172,7 +187,7 @@ async def searchgraph(interaction, phrase: str, nobots: bool = True, fullwords: 
             pattern = re.compile(fr'(?<!\w){phrase}(?!\w)', flags)
     else:
         pattern = re.compile(phrase, flags)
-    
+
     if '@everyone' in phrase or '@here' in phrase:
         await interaction.response.send_message(f'bro you really thought? naur...')
         return
@@ -203,7 +218,7 @@ async def searchgraph(interaction, phrase: str, nobots: bool = True, fullwords: 
             else:
                 if client.get_user(key) != None and key != 1256666003417469028:
                     sortedSearchHits.append((val, client.get_user(key).name, str(server.get_member(key).color)))
-    else: 
+    else:
         for key,val in msgDict.items():
             if nobots:
                 if client.get_user(key) != None and not client.get_user(key).bot:
@@ -236,7 +251,7 @@ async def searchgraph(interaction, phrase: str, nobots: bool = True, fullwords: 
         bar.set_color(colors[count])
         if not normalize:
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), nummessages[count], ha='center', va='bottom')
-        else: 
+        else:
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), str(round(nummessages[count], 2)) + '%', ha='center', va='bottom')
         count += 1
         label.set_position((bar.get_x() + bar.get_width() / 2, (-0.02 / figsizemod) + (-0.05 / figsizemod) * (count % max(int(len(people) / 3), 1))))
@@ -262,7 +277,7 @@ async def alphabet(interaction, person: str, heatmap: bool = True):
     # the answer is a dictionary. its always a dictionary
     # each key will be an alphabetical character, the value will be the number of that character
     # for each message hit in the file, iterate through each character and add it to the correct bucket when applicable
-    # this will take a while, maybe have a interaction.edit_original_response in there 
+    # this will take a while, maybe have a interaction.edit_original_response in there
     # then plot the data in a heat map
     await interaction.response.send_message(f'Searching...')
     frequency = defaultdict(int)
@@ -300,7 +315,7 @@ async def alphabet(interaction, person: str, heatmap: bool = True):
             row, col = keyboard_layout[key]
             # add the data to the array at that position
             formatteddata[row, col] = val
-        
+
         plt.figure(figsize=(10, 3))
         plt.title(f'{person}\'s alphabet heatmap! wow so cool')
         plt.imshow(formatteddata, cmap='cool', interpolation='nearest')
@@ -357,7 +372,6 @@ async def alphabet(interaction, person: str, heatmap: bool = True):
     embed = discord.Embed()
     embed.set_image(url="attachment://alphabet.png")
     await interaction.edit_original_response(embed=embed, attachments=[graph])
-
 
 def isenglishalpha(char):
     return char.isascii() and char.isalpha()
@@ -486,6 +500,105 @@ def format_numsides(num):
     else:
         return f'{num}th'
 
+# -- ACTIVITY HEAT MAP --
+
+@tree.command(
+    name="activityheatmap",
+    description="generate a heatmap",
+    guild=discord.Object(id=ACTIVE_SERVER)
+)
+@app_commands.describe(type = "heatmap or line")
+async def activityheatmap(interaction, type: str = 'heatmap'):
+    await interaction.response.send_message(f'lets do this shit!')
+    # want to get the number of messages sent for every month
+    # useful numbers: 86400 seconds is one day, 2628000 seconds is one month
+    # start time, hardcoded to first message every sent
+    startTime = datetime.datetime.fromtimestamp(1535451470)
+    messagesInMonth = 0
+    monthList = []
+    with open(MESSAGE_FILE_PATH, 'r') as f:
+        for line in f:
+                # the everything variable
+                z = json.loads(line)
+                timeElapsed = z.get("time") - startTime.timestamp()
+                if(timeElapsed >= 2628000):  
+                    monthList.append(messagesInMonth)
+                    messagesInMonth = 0
+                    startTime = datetime.datetime.fromtimestamp(z.get("time"))
+                else:
+                    messagesInMonth += 1
+    if(type == 'heatmap'):
+        cols = 12
+        rows = math.ceil(len(monthList) / cols)
+        for x in range(len(monthList), rows * cols):
+            monthList.append(0)
+        hmData = np.array(monthList[:rows * cols]).reshape(rows, cols)
+        # print(hmData)
+        # plt.figure(figsize=(rows, cols))
+        plt.title(f'Activity heatmap of messages sent by month')
+        plt.imshow(hmData, cmap='cool', interpolation='nearest', aspect='equal')
+        plt.colorbar()
+        plt.xlabel("Months passed")
+        plt.ylabel("Years passed")
+        i = 0
+        for hmInt in monthList:
+            plt.text(i % cols, i // cols, hmInt, ha='center', va='bottom', color='black', fontfamily='monospace', fontweight='bold', fontsize = 7)
+            i += 1
+    elif(type == 'line'):
+        plt.figure(figsize = (12,6))
+        plt.plot(range(len(monthList)), monthList, color='r', marker='o', linewidth=2, label='Messages per Month')
+        plt.title(f'Line graph of messages sent by month')
+        plt.xlabel(f'Months passed')
+        plt.ylabel(f'Number of messages sent')
+        plt.grid(True)
+    filename = "activity.png"
+    plt.savefig(filename, bbox_inches='tight')
+    plt.close()
+    graph = discord.File(filename)
+    embed = discord.Embed()
+    embed.set_image(url="attachment://activity.png")
+    await interaction.edit_original_response(embed=embed, attachments=[graph])
+    return
+
+# -- TIME AVERAGE --
+
+@tree.command(
+    name="timeaverage",
+    description="unique words",
+    guild=discord.Object(id=ACTIVE_SERVER)
+)
+async def timeaverage(interaction):
+    await interaction.response.send_message(f'lets do this shit!')
+    messages = []
+    with open(MESSAGE_FILE_PATH, 'r') as f:
+        for line in f:
+            z = json.loads(line)
+            messages.append(z)
+    messagesDF = pd.DataFrame(messages)
+    messagesDF['hour'] = messagesDF['time'].apply(lambda x: datetime.datetime.fromtimestamp(x, tz=timezone(timedelta(hours=-8)))).dt.hour
+    # pst = timezone(timedelta(hours=-8))
+    # messagesDF['hour'] = messagesDF['hourUTC'].apply(lambda x: pst.fromutc(x))
+    messagesByHour = messagesDF['hour'].value_counts().sort_index()
+    plt.figure(figsize=(10, 6))
+    plt.title(f'Messages sorted by time sent')
+    plt.bar(messagesByHour.index, messagesByHour.values)
+    formattedHours = []
+    for hour in messagesByHour.index:
+        formattedHours.append(f'{hour if hour != 0 else 24}:00')
+    plt.xticks(messagesByHour.index, formattedHours, fontsize=6)
+    plt.xlabel('Hour of the day')
+    plt.ylabel('Total messages sent')
+    plt.grid(axis='y', alpha=0.7)
+
+    filename = "timeaverage.png"
+    plt.savefig(filename, bbox_inches='tight')
+    plt.close()
+    graph = discord.File(filename)
+    embed = discord.Embed()
+    embed.set_image(url="attachment://timeaverage.png")
+    await interaction.edit_original_response(embed=embed, attachments=[graph])
+    return
+
 # -- NO LIFE GRAPH --
 
 @tree.command(
@@ -506,7 +619,7 @@ async def nolifegraph(interaction, date: str = str(datetime.datetime.now().strft
         # and then converting the mm/dd/yy format to time since epoch since that format works better for message_history.json
         date = datetime.datetime.strptime(date, '%m/%d/%y')
         # adding 86400 because datetime.datetime.now().strftime("%x") gets the mm/dd/yy but not the exact time of day
-        # since the goal for the default state is to get EVERY message, adding 86400 (the number of seconds in a day) 
+        # since the goal for the default state is to get EVERY message, adding 86400 (the number of seconds in a day)
         # adds a day to date and guarantees that every message was sent before it
         date = time.mktime((date).timetuple()) + 86400
 
@@ -563,7 +676,7 @@ async def nolifegraph(interaction, date: str = str(datetime.datetime.now().strft
                         # 365 / 12 * 86400 is the average number of seconds in a month across a 365 day year
                         # that magic number is 2,628,000
                         timeElapsed = z.get("time") - startTime.timestamp()
-                        if(timeElapsed >= 2628000):                            
+                        if(timeElapsed >= 2628000):
                             # should run at the end of this code block
                             timeElapsed = 0
                             count += 1
@@ -589,7 +702,7 @@ async def nolifegraph(interaction, date: str = str(datetime.datetime.now().strft
                         # 365 / 12 * 86400 is the average number of seconds in a month across a 365 day year
                         # that magic number is 2,628,000
                         timeElapsed = z.get("time") - startTime.timestamp()
-                        if(timeElapsed >= 2628000):                            
+                        if(timeElapsed >= 2628000):
                             # should run at the end of this code block
                             timeElapsed = 0
                             count += 1
@@ -621,7 +734,7 @@ async def nolifegraph(interaction, date: str = str(datetime.datetime.now().strft
                         # 365 / 12 * 86400 is the average number of seconds in a month across a 365 day year
                         # that magic number is 2,628,000
                         timeElapsed = z.get("time") - startTime.timestamp()
-                        if(timeElapsed >= 2628000):                            
+                        if(timeElapsed >= 2628000):
                             # should run at the end of this code block
                             timeElapsed = 0
                             count += 1
@@ -648,7 +761,7 @@ async def nolifegraph(interaction, date: str = str(datetime.datetime.now().strft
                         # 365 / 12 * 86400 is the average number of seconds in a month across a 365 day year
                         # that magic number is 2,628,000
                         timeElapsed = z.get("time") - startTime.timestamp()
-                        if(timeElapsed >= 2628000):                            
+                        if(timeElapsed >= 2628000):
                             # should run at the end of this code block
                             timeElapsed = 0
                             count += 1
@@ -661,7 +774,7 @@ async def nolifegraph(interaction, date: str = str(datetime.datetime.now().strft
                 y = []
                 # f = []
                 if not "#" in ndict:
-                    for key, val in msgHistory[ndict][1].items():                            
+                    for key, val in msgHistory[ndict][1].items():
                         if maximum > msgHistory[ndict][0] > minimum:
                             w.append(key)
                             y.append(val + oldval)
@@ -748,181 +861,74 @@ async def testgraph(interaction):
     embed.set_image(url="attachment://testgraph.png")
     await interaction.response.send_message(embed=embed, file=graph)
 
-# -- GET PAST DAY MESSAGES --
+# -- SECRET SANTA --
 
 @tree.command(
-    name="getpastdaymessages",
-    description="get all the messages sent from midnight pst to now and update the message file with them",
+    name="santa",
+    description="its secret snata bro",
     guild=discord.Object(id=ACTIVE_SERVER)
 )
 @app_commands.checks.has_permissions(administrator=True)
-async def getpastdaymessages(interaction):
-    await interaction.response.send_message(content="Beginning message processing...", ephemeral=True)
-    # for each channel, keep parsing messages until the time the message was sent is older than midnight pst
-    # we'll have to do some time processing before this loop by getting the current time and figuring out what day it is from that
-    # once we have a list of message dictionaries, sort this list by the msg id (maybe store as tuples (id, msgdict) to easily sort?)
-    # or: newlist = sorted(list_to_be_sorted, key=lambda d: d['name'])
-    # format for dates
-    dateFormat = '%Y/%m/%d %H:%M:%S %Z'
-    # get current time in pst
-    # curTime = datetime.datetime.now(tz=pytz.utc).astimezone(timezone('US/Pacific'))
-    curTime = datetime.datetime.now()
-    # convert curTime to time since epoch and subtract a day from that 
-    endTimeUnix = time.mktime((curTime).timetuple()) - 86400
-    # get every channel and make a list of them
-    server = client.get_guild(ACTIVE_SERVER)
-    channel_list = []
-    for cchannel in server.channels:
-        if(str(cchannel.type) == 'text'):
-            channel_list.append(cchannel)
-    await interaction.edit_original_response(content=f'{len(channel_list)} channels loaded...')
-    # actual loop to get messages
-    msgList = []
-    for tchannel in channel_list:
-        # can use limit=None here to keep getting messages
-        # can then break out of the loop once "time" is less than endTimeUnix
-        async for msg in tchannel.history(limit=None):
-            msgStored = {
-                "author": str(msg.author),
-                "authorID": msg.author.id,
-                "content": msg.content,
-                "channel": str(msg.channel),
-                "channelID": msg.channel.id,
-                "msgID": msg.id,
-                # subtracting 25200 to hardcode the timezone to pst instead of utc
-                # could use float(time.mktime(((msg.created_at).astimezone(timezone('US/Pacific'))).timetuple())) 
-                # for timezone support but im lazy and idk if it would work
-                "time": float(time.mktime((msg.created_at).timetuple()) - 25200)
-            }
-            if msgStored.get("time") < endTimeUnix:
-                break
-            # order doesnt matter so im just appending
-            # we will sort after
-            msgList.append(msgStored)
-    await interaction.edit_original_response(content=f'{len(msgList)} messages loaded...')
-    # plan from here on out: have two files. one is the dynamically updated one that updates with messages throughout the day
-    # the other will be one that only has messages up to the start of the current day
-    # we can open that second file in append mode, append the sorted list of messages (still have to sort)
-    # then, copy the file we just wrote to and overwrite the dynamically updating one
-    # this way i dont have to iterate backwards through the file
+@app_commands.describe(people = "enter a comma separated list of usernames")
+async def santa(interaction, people: str):
+    names = os.getenv("ALLOWED_PPL_NAMES")
+    participants = []
+    for mention in people.split(','):
+        for member in interaction.guild.members:
+            if member.name == mention.strip():
+                participants.append(member)
+    giftees = await fuckaroundandfindout(participants)
+    finalpairs = dict(zip(participants, giftees))
+    for gifter, giftee in finalpairs.items():
+        giftee_name = names[giftee.name]
+        try:
+            await gifter.send(f'secret santa motherfuckers. you alraedy know whats up\n\nyour\'e person is: {giftee_name}')
+        except discord.Forbidden:
+            print(f'{gifter.name} needs to enable DMs')
+    await interaction.response.send_message(f'sent out messages')
+    return
 
-    # potential problem: this function only gets messages from midnight until the time its run, so overwriting files like this could lose some messages
-    # for example: this function is run at noon, and gets 12 hours of messages. Then, a bunch of messages are sent and stored in the dynamic file
-    # the next day, this function is again run at noon. Since the daycapped file only has messages up to yesterdays noon, it misses every message sent between noon and 11:59pm
-    # potential solution: automatically run this function every day at 11:59pm
-    # other potential solution: traverse backwards instead of this two file overwriting system
-    msgList = sorted(msgList, key=lambda d: d["msgID"])
-    charCount = 0
-    with open(MESSAGE_FILE_PATH, 'r+') as f:
-        for line in reverse(f, batch_size=io.DEFAULT_BUFFER_SIZE):
-            # char count is to change the position of the file cursor eventually
-            charCount += len(line)
-            if json.loads(line).get("time") < endTimeUnix:
-                charCount -= len(line)
-                f.seek(0, 2)
-                # the one extra character is the end of file character thingy
-                # seek to position right at the start of the final message we logged
-                f.seek(f.tell() - charCount - 1, 0)
-                f.truncate()
-                break
-        for ndict in msgList:
-            json.dump(ndict, f)
-            f.write('\n')
+async def fuckaroundandfindout(gifters):
+    while True:
+        giftees = gifters.copy()
+        random.shuffle(giftees)
+        if not any(gifters[i] == giftees[i] for i in range(len(gifters))):
+            return giftees
 
 # -- GET ALL MESSAGES --
 
+CONCURRENT_CHANNEL_LIMIT = 10
+semaphore = asyncio.Semaphore(CONCURRENT_CHANNEL_LIMIT)
+
 @tree.command(
     name="getallmessages",
-    description="goes through every message and stores them",
+    description="gets every message sent and sorts them, and then stores them",
     guild=discord.Object(id=ACTIVE_SERVER)
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def getallmessages(interaction):
-    #general
-    channelToSend = interaction.channel
-    channel = client.get_channel(686423342345093203)
-    channel_list = []
-    # numOfRemainingChannels = 0
-    # hard coded server id (currently testing emoji)
+    # send a starter message
+    await interaction.response.send_message(content=f'beginning message search', ephemeral=True)
+    messageList = []
     server = client.get_guild(ACTIVE_SERVER)
-    await interaction.response.send_message(content=f'Beginning the process...', ephemeral=True)
-    for cchannel in server.channels:
-        if(str(cchannel.type) == 'text'):
-            channel_list.append(cchannel)
-            # numOfRemainingChannels += 1
-    # channel = bot.get_all_channels
-    await interaction.edit_original_response(content=f'Adding {len(channel_list)} channels...')
-    msgCount = 0
-    allMessage = []
-    lastUnchecked = []
-    messageDump = {}
-    oldestChnl = channel
-    markForDel = []
-    seenIDS = set()
-    curMessage = datetime.datetime.fromtimestamp(1483272000)
-
-    # get 100 messages from each channel initially to fill messageDump
-    for tchannel in channel_list:
-        templ = []
-        async for msg in tchannel.history(limit=100, after=curMessage, oldest_first=True):
-            templ.append(msg)
-        # messageDump is a dictionary with channels as the key and 100 (or less) messages as the value
-        # check to remove any channels with 0 messages since they cause an index out of bounds error
-        if templ:
-            messageDump[tchannel] = templ
-            msgCount += 1
-            await interaction.edit_original_response(content=f'Adding {len(messageDump[tchannel])} messages to the initial list... ({msgCount}/{len(channel_list) - len(markForDel)})')
-        else:
-            markForDel.append(msgCount)
-    for x in markForDel:
-        del channel_list[x]
-    msgCount = 0
-    # initial filling of lastUnchecked so that the loop after this works
-    for tchannel in channel_list:
-        msg = (messageDump.get(tchannel))[0]
-        msgStored = {
-            "author": str(msg.author),
-            "authorID": msg.author.id,
-            "content": msg.content,
-            "channel": str(msg.channel),
-            "channelID": msg.channel.id,
-            "msgID": msg.id,
-            # subtracting 25200 because thats the number of seconds in 7 hours (utc to pst)
-            "time": float(time.mktime((msg.created_at).timetuple()) - 25200)
-        }
-        msgCount += 1
-        # remove first item in list
-        (messageDump.get(tchannel)).pop(0)
-        # should only need to run this once, then in the while loop just check the second condition
-        # first condition is just a check to see if there are any elements in the list since the next condition breaks without any elements in the list
-
-        heapq.heappush(lastUnchecked, (msgStored["msgID"], msgStored))
-
-    # printing the length of lastUnchecked and the length of the allMessage list.
-    # left side should be number of channels and right side should count up to the number of total messages
-    print(f'{len(lastUnchecked)}, {len(allMessage) + 1}')
-    # using messages for the after= part of .history since it's way more accurate
-    # tried using dates but it would skip every remaining message from the day the message was sent
-    # probably my fault
-    curMessage = discord.Object(id=lastUnchecked[0][1].get("msgID"))
-    oldestChnl = client.get_channel(lastUnchecked[0][1].get("channelID"))
-    # removes first element from list and appends it to allMessage
-    # using a set to check if the element is a duplicate
-    mID = lastUnchecked[0][1].get("msgID")
-    if mID not in seenIDS:
-        seenIDS.add(mID)
-        allMessage.append(heapq.heappop(lastUnchecked)[1])
-    else:
-        heapq.heappop(lastUnchecked)
-        msgCount -= 1
-        print("duplicate found!")
-    # allMessage.append(heapq.heappop(lastUnchecked)[1])
-
-    # while elements are in lastUnchecked, this loop will run. this should end after the last message has been processed
-    while lastUnchecked:
-        if messageDump:
-            msg = (messageDump.get(oldestChnl))[0]
-            msgStored = {
+    # create a task for every text channel in ACTIVE_SERVER
+    taskList = [channelMessageCollector(chnl) for chnl in server.channels if str(chnl.type) == 'text']
+    timeStart = time.time()
+    # start running the tasks in taskList
+    messageList = await asyncio.gather(*taskList)
+    # flatten the list of lists into one single list
+    allMessages = [msg for channelMsgs in messageList for msg in channelMsgs]
+    timeEnd = time.time()
+    print(f'{len(allMessages)} messages found and stored in allMessages, took {(timeEnd - timeStart):.2f} seconds')
+    # begin sort
+    timeStart = time.time()
+    allMessagesSorted = sorted(allMessages, key = lambda msg: msg.created_at)
+    timeEnd = time.time()
+    print(f'{len(allMessagesSorted)} messages sorted, took {(timeEnd - timeStart):.2f} seconds')
+    messageList.clear()
+    # get all the essential information
+    for msg in allMessagesSorted:
+        msgDict = {
                 "author": str(msg.author),
                 "authorID": msg.author.id,
                 "content": msg.content,
@@ -931,89 +937,224 @@ async def getallmessages(interaction):
                 "msgID": msg.id,
                 # subtracting 25200 because thats the number of seconds in 7 hours (utc to pst)
                 "time": float(time.mktime((msg.created_at).timetuple()) - 25200)
-            }
-            msgCount += 1
-            (messageDump.get(oldestChnl)).pop(0)
-            heapq.heappush(lastUnchecked, (msgStored["msgID"], msgStored))
-            curMessage = discord.Object(id=lastUnchecked[0][1].get("msgID"))
-            oldestChnl = client.get_channel(lastUnchecked[0][1].get("channelID"))
-
-        print(f'{len(lastUnchecked)}, {len(allMessage) + 1}')
-        # if (len(allMessage) + 1) > 331677:
-        #     print("test")
-
-        if not messageDump.get(oldestChnl):
-            messageDump[oldestChnl] = await get100Messages(oldestChnl, curMessage)
-            # this problem becomes greater the more channels there are
-            # there is definitely a solution to be had here with a loop
-            # but i dont want to try that right now
-            # so instead ill just manually clear up the messages
-            # if (int(msgStored.get("channelID")) == int(lastUnchecked[0][1].get("channelID"))) and (msgStored.get("msgID") != lastUnchecked[0][1].get("msgID")):
-            #     del messageDump.get(oldestChnl)[0]
-            # first check: if there still isnt anything in messagedump at position oldestChnl, do this if statement
-            # second check: if messagedump still has something left in it. if this isnt true, theres no need to 
-            # go through all of this since every remaining message is in lastUnchecked
-            if not messageDump.get(oldestChnl):
-                # remove the emptry key/value pair from messagedump since its no longer needed
-                del messageDump[oldestChnl]
-                if messageDump:
-                    temp = []
-                    for item in messageDump.values():
-                    # i have no idea if this will even work
-                    # theoretically we are indexing to the first (and only) dictionary of item
-                    # which should be the key value pair of channel : [list of messages]
-                    # then find the first index of that list (which should be a message object)
-                    # get the channel id and the message id of that message and submit it as a tuple
-                        if item:
-                            heapq.heappush(temp, (item[0].id, item[0].channel.id))
-                    # HERE WAS THE PROBLEM
-                    if temp:
-                        oldestChnl = client.get_channel(temp[0][1])
-                    else:
-                        messageDump.clear()
-        mID = lastUnchecked[0][1].get("msgID")
-        if mID not in seenIDS:
-            seenIDS.add(mID)
-            allMessage.append(heapq.heappop(lastUnchecked)[1])
-        else:
-            heapq.heappop(lastUnchecked)
-            msgCount -= 1
-            print("duplicate found!")
-        # allMessage.append(heapq.heappop(lastUnchecked)[1])
-
-    # i really cant be bothered to fix the issue of duplicate values at the end of the list sooo
-    # heres a linear time thingy that uses a set to check if there is a duplicate msg ID
-    # if the id isnt a duplicate, add it to noDupeMessage
-    # if it is a duplicate, subtract 1 from msgCount to correct the errors
-    # seenIDS = set()
-    # noDupeMessage = []
-    # for ndict in allMessage:
-    #     mID = ndict.get("msgID")
-    #     if mID not in seenIDS:
-    #         seenIDS.add(mID)
-    #         noDupeMessage.append(ndict)
-    #     else:
-    #         msgCount -= 1
-
+        }
+        messageList.append(msgDict)
     with open(MESSAGE_FILE_PATH, 'w') as f:
-        for mdict in allMessage:
-            json.dump(mdict, f)
+        for msg in messageList:
+            json.dump(msg, f)
             f.write('\n')
-    print(msgCount)
 
-    await confirmationMessage(msgCount, channelToSend)
-    # await interaction.edit_original_response(content=f'Found and stored {msgCount} messages')
+async def channelMessageCollector(chnl):
+    # make sure that no more processes than allowed are running
+    async with semaphore:
+        messageList = []
+        timeList = []
+        # only proceed with message gathering if the channel type is text
+        timeStart = time.time()
+        # run an initial history call to get the oldest 500 messages to establish the currentMessage variable
+        async for msg in chnl.history(limit=500, oldest_first=True):
+            messageList.append(msg)
+        # set currentMessage to the most recently added message
+        # could be a rare edge case where there's a channel with no messages
+        currentMessage = messageList[-1] if messageList else None
+        # once the last messages have been processed, currentMessage should be set to None
+        while currentMessage:
+            tempMessageList = []
+            async for msg in chnl.history(limit=500, after=currentMessage, oldest_first=True):
+                tempMessageList.append(msg)
+            # exit loop if no messages were found
+            if not tempMessageList:
+                currentMessage = None
+                timeEnd = time.time()
+                timeList.append(timeEnd - timeStart)
+            else:
+                # add values from tempMessageList to messageList
+                messageList.extend(tempMessageList)
+                currentMessage = messageList[-1]
+            # console info to amke sure everything is running
+            if(len(messageList) % 3000 == 0):
+                timeEnd = time.time()
+                timeList.append(timeEnd - timeStart)
+                print(f'channel: {chnl.name}, {len(messageList)}, took {timeList[-1]:.2f} seconds')
+                timeStart = time.time()
+        print(f'channel: {chnl.name} DONE, {len(messageList)} messages took {sum(timeList):.2f} seconds')
+        return messageList
 
-# helper function for getAllMessages
-# takes a channel and a message to get the messages after
-async def get100Messages(channel, curMessage):
-    msgList = []
-    async for msg in channel.history(limit=100, after=curMessage, oldest_first=True):
-        msgList.append(msg)
-    return msgList
+@tree.command(
+    name="tempcommand",
+    description="this is a command where i do things",
+    guild=discord.Object(id=ACTIVE_SERVER)
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def tempcommand(interaction):
+    # read the last 1000 messages, parse out the content, then create a dictionary with every
+    # unique word in the content being a key and the value being that word's frequency
+    content = {}
+    num = 1
+    count = 0
+    with open(MESSAGE_FILE_PATH, 'r+') as f:
+        for line in reverse(f, batch_size=io.DEFAULT_BUFFER_SIZE):
+            if num > 1000:
+                break
+            num += 1
+            words = re.findall(r'\b\w+\b', json.loads(line).get("content"))
+            for word in words:
+                if not word.isnumeric() and not ishex(word):
+                    if word in content:
+                        content[word] += 1
+                    else:
+                        content[word] = 1
+                    count += 1
+    with open("wordfreq.csv", 'w', newline = '') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Word', 'Frequency'])
+        for key,val in content.items():
+            writer.writerow([key, val])
+    await interaction.response.send_message(f'wrote last 1000 messages to csv file')
 
-async def confirmationMessage(msgCount, channel):
-    await channel.send(f'Found and stored {msgCount} messages')
+def ishex(nstring):
+    try:
+        int(nstring, 16)
+        return True
+    except ValueError:
+        return False
+
+# -- MUSIC --
+
+@tree.command(
+    name="nightcore",
+    description="ifourloveistragedywhyareyoumyremedy",
+    guild=discord.Object(id=ACTIVE_SERVER)
+)
+async def nightcore(interaction):
+    global SELECTED_SONGS, SELECTED_SONG_NAMES, NIGHTCORE, NIGHTCORE_NAMES
+    # make sure author is in vc
+    if not interaction.user.voice:
+        await interaction.response.send_message(f'join a voice channel first bozo')
+        return
+    channel = interaction.user.voice.channel
+    vc = interaction.guild.voice_client
+    # connect to vc, or move vc
+    if vc is None:
+        vc = await channel.connect()
+    elif vc.channel != channel:
+        await vc.move_to(channel)
+    await interaction.response.send_message(f'going nightcore mode')
+    # load the nightcore playlist into the selected songs list
+    SELECTED_SONGS = NIGHTCORE
+    SELECTED_SONG_NAMES = NIGHTCORE_NAMES
+    # begin the audio loop
+    if not vc.is_playing():
+        await play_next(vc, None)
+
+async def play_next(vc, e):
+    global SELECTED_SONGS, SELECTED_SONG_NAMES, CURRENT_SONG_NAME, CURRENT_SONG
+    if e:
+        print(f'error on that thang: {e}')
+    # remove current song from front of queue and move it to the back of the queue
+    CURRENT_SONG = SELECTED_SONGS.pop(0)
+    CURRENT_SONG_NAME = SELECTED_SONG_NAMES.pop(0)
+    SELECTED_SONGS.append(CURRENT_SONG)
+    SELECTED_SONG_NAMES.append(CURRENT_SONG_NAME)
+    # creating audio source, dirty little async stuff to get it to actually play, and then play command with recursive call
+    audio_source = discord.FFmpegPCMAudio(CURRENT_SONG)
+    loop = asyncio.get_event_loop()
+    vc.play(audio_source, after=lambda e: run_coroutine_threadsafe(play_next(vc, e), loop))
+
+@tree.command(
+    name="vcpause",
+    description="figure it out",
+    guild=discord.Object(id=ACTIVE_SERVER)
+)
+async def vcpause(interaction):
+    vc = interaction.guild.voice_client
+    # makes sure music is actually playing
+    if not vc or not vc.is_playing():
+        await interaction.response.send_message(f'no song playing lil bro')
+        return
+    vc.pause()
+    await interaction.response.send_message(f'paused the audio. just for u. i would do anything for you')
+
+@tree.command(
+    name="vcresume",
+    description="the sequel to pausing",
+    guild=discord.Object(id=ACTIVE_SERVER)
+)
+async def vcresume(interaction):
+    vc = interaction.guild.voice_client
+    # makes sure music is actually paused
+    if not vc or not vc.is_paused():
+        await interaction.response.send_message(f'what are you doing')
+        return
+    vc.resume()
+    await interaction.response.send_message(f'YEAHHHHHHHHHH LETS GET THIS PARTY FUCKING GOING!!!!!!!!!!!')
+
+@tree.command(
+    name="vcstop",
+    description="makes bot leave vc and stop audio",
+    guild=discord.Object(id=ACTIVE_SERVER)
+)
+async def vcstop(interaction):
+    global CURRENT_SONG_NAME, CURRENT_SONG, SELECTED_SONGS, SELECTED_SONG_NAMES
+    vc = interaction.guild.voice_client
+    if vc:
+        # resets four of the globals just to be safe. the selected songs have to be reset, not sure on the current songs but i'd rather not risk it
+        vc.stop()
+        CURRENT_SONG = None
+        CURRENT_SONG_NAME = None
+        SELECTED_SONGS = None
+        SELECTED_SONG_NAMES = None
+        await vc.disconnect()
+        await interaction.response.send_message(f'bye bey !')
+    else:
+        await interaction.response.send_message(f'so hatefu;l??')
+
+@tree.command(
+    name="vcskip",
+    description="you dont need this",
+    guild=discord.Object(id=ACTIVE_SERVER)
+)
+async def vcskip(interaction):
+    global CURRENT_SONG_NAME
+    vc = interaction.guild.voice_client
+    if not vc:
+        await interaction.response.send_message(f'fuck u doin bro')
+        return
+    # calling vc.stop() before the skip message gets sent causes the current song to change since the next play_next() call goes through immediately.
+    # so i have this
+    song_name_before_stop = CURRENT_SONG_NAME
+    vc.stop()
+    await interaction.response.send_message(f"skipped {song_name_before_stop}")
+
+@tree.command(
+    name="vcqueue",
+    description="lists queue",
+    guild=discord.Object(id=ACTIVE_SERVER)
+)
+async def vcqueue(interaction):
+    global SELECTED_SONG_NAMES
+    if not SELECTED_SONG_NAMES:
+        await interaction.response.send_message(f'aint nothing here lil bro')
+    else:
+        # i dont know
+        queue_message = "\n".join([f"{index + 1}. {song}" for index, song in enumerate(NIGHTCORE_NAMES)])
+        await interaction.response.send_message(f"Song queue:\n{queue_message}")
+
+@client.event
+async def on_voice_state_update(member, before, after):
+    global CURRENT_SONG, CURRENT_SONG_NAME, SELECTED_SONGS, SELECTED_SONG_NAMES
+    vc = discord.utils.get(client.voice_clients, guild=member.guild)
+    if vc and vc.channel:
+        non_bots = [m for m in vc.channel.members if not m.bot]
+        # if on voice state update there are no real people in vc and the bot is in vc, do all the exit stuff and leave
+        if not non_bots:
+           if vc.is_playing() or vc.is_paused():
+               vc.stop()
+               CURRENT_SONG = None
+               CURRENT_SONG_NAME = None
+               SELECTED_SONGS = None
+               SELECTED_SONG_NAMES = None
+               await vc.disconnect()
 
 # -- TWITTER THING --
 
@@ -1035,6 +1176,7 @@ async def twt(interaction):
     # create a list and a set - the set is for checking duplicate ids cause im lazy
     tweetlist = []
     seenIDS = set()
+    goonnum = random.randint(1,50)
     await interaction.response.send_message(f'searching for image...')
     with open(TWEET_ID_FILE_PATH, 'r') as f:
         for line in f:
@@ -1045,36 +1187,11 @@ async def twt(interaction):
         for line in f:
             x = json.loads(line)
             tweetlist.append(x)
-        testlist = []
-        imageurl = "noimage"
         # if the file has less than 10 entries left, get 20 new entries (duplicates filtered out)
         if len(tweetlist) < 3:
-            api = API()
-            # add twitter accounts and log in
-            await api.pool.add_account(TWITTER_USERNAME, TWITTER_PASSWORD, TWITTER_EMAIL, TWITTER_EMAIL_PASSWORD)
-            await api.pool.login_all()
-            testlist = await gather(api.search("filter:follows filter:images include:nativeretweets", limit=20))
-            for tweet in testlist:
-                if ((tweet.id not in seenIDS) and (tweet.retweetedTweet == None)):
-                    seenIDS.add(tweet.id)
-                    if tweet.media.photos:
-                        imageurl = tweet.media.photos[0].url
-                    tweetStored = {
-                        "url": tweet.url,
-                        "imgurl": imageurl,
-                        "username": tweet.user.username,
-                        "msgID": tweet.id
-                    }
-                    tweetlist.append(tweetStored)
-                elif ((tweet.retweetedTweet) and (tweet.retweetedTweet.id not in seenIDS)):
-                    seenIDS.add(tweet.retweetedTweet.id)
-                    tweetStored = {
-                        "url": tweet.retweetedTweet.url,
-                        "imgurl": tweet.retweetedTweet.media.photos[0].url,
-                        "username": tweet.retweetedTweet.user.username,
-                        "msgID": tweet.retweetedTweet.id
-                    }
-                    tweetlist.append(tweetStored)
+            testtuple = await refill_tweet_storage(seenIDS)
+            tweetlist += testtuple[0]
+            seenIDS = seenIDS.union(testtuple[1])
         if not tweetlist:
             await interaction.edit_original_response(content=f'no new posts yet. stop gooning and wait a while')
             return
@@ -1085,7 +1202,7 @@ async def twt(interaction):
         embedAuthor.set_author(name=f'from {tweetlist[0].get("username")}:', url=tweetlist[0].get("url"))
         if not tweetlist[0].get("imgurl") == "noimage":
             filename = "tweetimage.png"
-            urllib.request.urlretrieve(tweetlist[0].get("imgurl"), filename)
+            await urllib_download(tweetlist[0].get("imgurl"), filename)
             tweetfile = discord.File(filename)
             embedFile = discord.Embed()
             embedFile.set_image(url="attachment://tweetimage.png")
@@ -1095,7 +1212,10 @@ async def twt(interaction):
             embedFile = discord.Embed()
             embedFile.set_image(url="attachment://lips.png")
         # send both embeds
-        await interaction.edit_original_response(content=None, embeds=[embedAuthor, embedFile], attachments=[tweetfile])
+        if goonnum != 1:
+            await interaction.edit_original_response(content=None, embeds=[embedAuthor, embedFile], attachments=[tweetfile])
+        else:
+            await interaction.edit_original_response(content=f'{interaction.user.name} is a gooner <:meowblush:846965478773882880>', embeds=[embedAuthor, embedFile], attachments=[tweetfile])
         # remove first element of the list (it's already been sent, no need to send it again)
         tweetlist.pop(0)
         # seek to beginning of file and truncate
@@ -1111,11 +1231,249 @@ async def twt(interaction):
             json.dump(idStored, f)
             f.write('\n')
 
+@tree.command(
+    name="twttournament",
+    description="tournament between 16 twitter images",
+    guild=discord.Object(id=ACTIVE_SERVER)
+)
+async def twttournament(interaction):
+    initialtweets = []
+    round1 = [] # 16
+    round2 = [] # 8
+    round3 = [] # 4
+    round4 = [] # 2
+    # create set of seen IDS and populate the set
+    seenIDS = set()
+    await interaction.response.send_message(f'searching for images...')
+    with open(TWEET_ID_FILE_PATH, 'r') as f:
+        for line in f:
+            seenIDS.add(json.loads(line).get("msgID"))
+    # populate tweet storage with as many tweets as possible
+    # get all the data from file and combine it with the freshly grabbed data
+    with open(TWEET_FILE_PATH, 'r+') as f:
+        for line in f:
+            x = json.loads(line)
+            initialtweets.append(x)
+    # grab 16 tweets
+    if len(initialtweets) < 16:
+        testtuple = await refill_tweet_storage(seenIDS)
+        initialtweets += testtuple[0]
+        seenIDS = seenIDS.union(testtuple[1])
+    # length check - abort command if failed
+    if len(initialtweets) < 16:
+        await interaction.edit_original_response(content=f'not enough stored tweets for a tournament')
+        return
+    random.shuffle(initialtweets)
+    for i in range(16):
+        round1.append(initialtweets[0])
+        initialtweets.pop(0)
+    # store the remaining elements
+    with open(TWEET_FILE_PATH, 'r+') as f:
+        f.seek(0, 0)
+        f.truncate()
+        for ndict in initialtweets:
+            json.dump(ndict, f)
+            f.write('\n')
+    with open(TWEET_ID_FILE_PATH, 'w') as f:
+        for id in seenIDS:
+            idStored = {"msgID": id}
+            json.dump(idStored, f)
+            f.write('\n')
+    # main code
+    # need to get the message from the interaction, and then replace all interaction code after this comment with message code instead
+    msg = await interaction.original_response()
+    await msg.create_thread(name='tournament discussion')
+    round2 = await tournament_helper(msg, round1, 5, 1, 1)
+    # refresh message
+    msg = await msg.fetch()
+    if not round2:
+        await msg.edit(content=f'well thats no fun.', embed=None, attachments=[])
+        return
+    # round 1 over, round 2 begins
+    await msg.edit(content=f'ROUND ONE OVER !!! BEGINNING ROUND TWO IN THREE SECONDS...', embed=None, attachments=[])
+    await asyncio.sleep(3)
+    round3 = await tournament_helper(msg, round2, 6, 1, 2)
+    msg = await msg.fetch()
+    if not round3:
+        await msg.edit(content=f'well thats no fun.', embed=None, attachments=[])
+        return
+    await msg.edit(content=f'ROUND TWO OVER !!! BEGINNING ROUND THREE IN THREE SECONDS...', embed=None, attachments=[])
+    await asyncio.sleep(3)
+    round4 = await tournament_helper(msg, round3, 7, 1, 3)
+    msg = await msg.fetch()
+    if not round4:
+        await msg.edit(content=f'well thats no fun.', embed=None, attachments=[])
+        return
+    await msg.edit(content=f'TIME FOR THE FINAL BATTLE!!!', embed=None, attachments=[])
+    await asyncio.sleep(3)
+    round4 = await tournament_helper(msg, round4, 7, 0, 4)
+    msg = await msg.fetch()
+    if not round4:
+        await msg.edit(content=f'well thats no fun.', embed=None, attachments=[])
+        return
+    embedAuthor = discord.Embed()
+    embedAuthor.set_author(name=f'from {round4[0].get("username")}:', url=round4[0].get("url"))
+    await urllib_download(round4[0].get("imgurl"), "tweetimaget1.png")
+    tweetfile = discord.File("tweetimaget1.png")
+    embedFile = discord.Embed()
+    embedFile.set_image(url="attachment://tweetimaget1.png")
+    await msg.edit(content=f'THE TOURNAMENT WINNER!', embeds=[embedAuthor, embedFile], attachments=[tweetfile])
+
+async def urllib_download(imgurl, filename):
+    for i in range(3):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(imgurl) as response:
+                    if response.status == 200:
+                        with open(filename, 'wb') as f:
+                            f.write(await response.read())
+                        return
+                    else:
+                        print(f'failed with status {response.status}')
+            # urllib.request.urlretrieve(imgurl, filename)
+            # await asyncio.sleep(0.5)
+            # return
+        except Exception as e:
+            # last try
+            if i == 2:
+                print(f'download of {imgurl} failed 3 times')
+                return
+            print(f'error downloading {imgurl}, retrying in 3 seconds...')
+            await asyncio.sleep(3)
+
+async def tournament_helper(msg, roundlist, peoplerequiredplustwo, enablescaling, roundnum):
+    returnlist = []
+    timewaited = 0
+    votingnum = 1
+    weirdflag = 0
+    while roundlist:
+        # image 1
+        if not roundlist[0].get("imgurl") == "noimage":
+            filename = "tweetimaget1.png"
+            await urllib_download(roundlist[0].get("imgurl"), filename)
+            leftImage = Image.open(filename)
+        else:
+            filename = "lips.png"
+            leftImage = Image.open(filename)
+        # image 2
+        if not roundlist[1].get("imgurl") == "noimage":
+            filename = "tweetimaget2.png"
+            await urllib_download(roundlist[1].get("imgurl"), filename)
+            rightImage = Image.open(filename)
+        else:
+            filename = "lips.png"
+            rightImage = Image.open(filename)
+        # resize the second image to be the same size as the first, and add the 1 OR 2 image between them
+        authors = f'left image by: {roundlist[0].get("username")} | right image by: {roundlist[1].get("username")}'
+        middleImage = Image.open("1or2.png")
+        newRightWidth = int(rightImage.size[0] * (leftImage.size[1] / rightImage.size[1]))
+        newMiddleWidth = int(middleImage.size[0] * (leftImage.size[1] / middleImage.size[1]))
+        newHeight = leftImage.size[1]
+        rightImage = rightImage.resize((newRightWidth, newHeight))
+        middleImage = middleImage.resize((newMiddleWidth, newHeight))
+        combinedImage = Image.new('RGB', (leftImage.size[0] + rightImage.size[0] + middleImage.size[0], leftImage.size[1]))
+        combinedImage.paste(leftImage, (0, 0))
+        combinedImage.paste(middleImage, (leftImage.size[0], 0))
+        combinedImage.paste(rightImage, (leftImage.size[0] + middleImage.size[0], 0))
+        combinedImage.save("combinedtweetimage.png")
+        tweetfile = discord.File("combinedtweetimage.png")
+        embedFile = discord.Embed()
+        embedFile.set_image(url="attachment://combinedtweetimage.png")
+        # send both embeds
+        await msg.edit(content=authors, embeds=[embedFile], attachments=[tweetfile])
+        msg = await msg.fetch()
+        await msg.clear_reactions()
+        await msg.add_reaction("1️⃣")
+        await msg.add_reaction("2️⃣")
+        # update msg to have both reactions
+        msg = await msg.fetch()
+        await asyncio.sleep(5)
+        if len(msg.reactions) <= 1:
+            await msg.clear_reactions()
+            return []
+        if not (str(msg.reactions[0]) == "1️⃣" and str(msg.reactions[1]) == "2️⃣"):
+            await msg.clear_reactions()
+            return []
+        # another while loop inside the while loop to check for reactions
+        # continuously update the msg to make sure the reaction count is accurate
+        msg = await msg.fetch()
+        if len(msg.reactions) <= 1:
+            await msg.clear_reactions()
+            return []
+        if not (str(msg.reactions[0]) == "1️⃣" and str(msg.reactions[1]) == "2️⃣"):
+            await msg.clear_reactions()
+            return []
+        while (msg.reactions[0].count + msg.reactions[1].count < peoplerequiredplustwo):
+            await asyncio.sleep(15)
+            if timewaited == 120 and enablescaling == 1:
+                peoplerequiredplustwo -= 2
+                weirdflag = 1
+            if timewaited % 4 == 0:
+                await msg.edit(content=f'{authors}\nBRACKET: {roundnum}   ROUND: {votingnum}   {timewaited / 4} MINUTES ELAPSED\nVOTES: {(msg.reactions[0].count + msg.reactions[1].count - 2)}/{peoplerequiredplustwo - 2}')
+            timewaited += 1
+            msg = await msg.fetch()
+            if len(msg.reactions) <= 1:
+                await msg.clear_reactions()
+                return []
+            if not (str(msg.reactions[0]) == "1️⃣" and str(msg.reactions[1]) == "2️⃣"):
+                await msg.clear_reactions()
+                return []
+        if weirdflag == 1:
+            peoplerequiredplustwo += 2
+            weirdflag = 0
+        timewaited = 0
+        # left image wins OR tie (shouldnt be a tie but just in case)
+        if msg.reactions[0].count > msg.reactions[1].count:
+            returnlist.append(roundlist[0])
+        elif msg.reactions[0].count < msg.reactions[1].count:
+            returnlist.append(roundlist[1])
+        else:
+            returnlist.append(roundlist[random.randint(0, 1)])
+        roundlist.pop(0)
+        roundlist.pop(0)
+        votingnum += 1
+        await msg.channel.send(content='plap plap plap get notified get notified get notified', delete_after=1.0)
+    await msg.clear_reactions()
+    return returnlist
+
+async def refill_tweet_storage(seenIDS):
+    tweetlist = []
+    imageurl = "noimage"
+    testlist = []
+    api = API(proxy=proxy)
+    # add twitter accounts and log in
+    await api.pool.add_account(TWITTER_USERNAME, TWITTER_PASSWORD, TWITTER_EMAIL, TWITTER_EMAIL_PASSWORD)
+    await api.pool.login_all()
+    testlist = await gather(api.search("filter:follows filter:images include:nativeretweets min_faves:4000", limit=80))
+    for tweet in testlist:
+        if ((tweet.id not in seenIDS) and (tweet.retweetedTweet == None)):
+            seenIDS.add(tweet.id)
+            if tweet.media.photos:
+                imageurl = tweet.media.photos[0].url
+            tweetStored = {
+                "url": tweet.url,
+                "imgurl": imageurl,
+                "username": tweet.user.username,
+                "msgID": tweet.id
+            }
+            tweetlist.append(tweetStored)
+        elif ((tweet.retweetedTweet) and (tweet.retweetedTweet.id not in seenIDS)):
+            seenIDS.add(tweet.retweetedTweet.id)
+            tweetStored = {
+                "url": tweet.retweetedTweet.url,
+                "imgurl": tweet.retweetedTweet.media.photos[0].url,
+                "username": tweet.retweetedTweet.user.username,
+                "msgID": tweet.retweetedTweet.id
+            }
+            tweetlist.append(tweetStored)
+    return (tweetlist, seenIDS)
 
 @client.event
 async def on_audit_log_entry_create(entry):
     channel = client.get_channel(1261771365539909674)
     ACTION_STRING = format_action(entry)
+    if ACTION_STRING == None:
+        return
     #print(f'{(entry.after).__dict__.keys()}')
     await channel.send(f'{entry.user} {ACTION_STRING}')
 
@@ -1179,8 +1537,14 @@ def format_action(entry):
             return f'updated the sticker named {(entry.before).name}: {(entry.after).__dict__}'
         case "sticker_delete":
             return f'deleted the sticker named {(entry.before).name}'
+        case "thread_create":
+            return f'created a thread named {(entry.before).name}'
+        case "thread_update":
+            return f'updated a thread named {(entry.before).name}'
+        case "thread_delete":
+            return f'deleted a thread named {(entry.before).name}'
         case _:
-            return 'did an unknown action... ooooooh...h.... how meysterious,'
+            return None
 
 @client.event
 async def on_app_command_completion(interaction, command):
@@ -1225,27 +1589,36 @@ async def on_message(msg):
     }
     # when the x is x sus bot reaction code
     if((msgStored.get("authorID") == 812172490256285747) and ("when " in msgStored.get("content"))):
-        await msg.add_reaction("❌")
-        await asyncio.sleep(3)
-        if(msg.reactions[0].count > 1):
-            with open(DELETED_BOT_MESSAGES_FILE_PATH, 'r+') as f:
-                log = json.loads(f.read())
-                async for person in msg.reactions[0].users():
-                    # check if user is NOT this bot
-                    if person.id != 1256666003417469028:
-                        if not log.get(person.name):
-                            log[person.name] = 1
-                        else:
-                            log[person.name] += 1
-                f.seek(0)
-                json.dump(log, f)
-                f.truncate()
-            await msg.delete()
-        else:
-            await msg.clear_reactions()
-            with open(MESSAGE_FILE_PATH, 'a') as f:
-                json.dump(msgStored, f)
-                f.write('\n')
+        i = 1
+        cancel = 0
+        async for message in client.get_channel(msgStored.get("channelID")).history(limit=2):
+            # me, avery, and the sus bot
+            if (i == 2 and (message.author.id == 731200697076547644 or message.author.id == 164560262031081472 or message.author.id == 812172490256285747)):
+                await msg.delete()
+                cancel = 1
+            i += 1
+        if cancel == 0:
+            await msg.add_reaction("❌")
+            await asyncio.sleep(3)
+            if(msg.reactions[0].count > 1):
+                with open(DELETED_BOT_MESSAGES_FILE_PATH, 'r+') as f:
+                    log = json.loads(f.read())
+                    async for person in msg.reactions[0].users():
+                        # check if user is NOT this bot
+                        if person.id != 1256666003417469028:
+                            if not log.get(person.name):
+                                log[person.name] = 1
+                            else:
+                                log[person.name] += 1
+                    f.seek(0)
+                    json.dump(log, f)
+                    f.truncate()
+                await msg.delete()
+            else:
+                await msg.clear_reactions()
+                with open(MESSAGE_FILE_PATH, 'a') as f:
+                    json.dump(msgStored, f)
+                    f.write('\n')
     elif(msg.guild == client.get_guild(ACTIVE_SERVER)):
         with open(MESSAGE_FILE_PATH, 'a') as f:
             json.dump(msgStored, f)
@@ -1253,9 +1626,9 @@ async def on_message(msg):
     # shut up congor
     if(msgStored.get("authorID") == 247858291760300032):
         if(random.randint(1,1000) == 1):
-            await msg.channel.send("shut up congor")
+            await msg.channel.send("shut up corgal")
     # keith test command thing
-    kstr = "voidwhite"
+    kstr = "voidwhiteletsfuckinggo"
     count = 0
     for char in msgStored.get("content").casefold():
         if char == kstr[count]:
@@ -1268,141 +1641,3 @@ async def clearReaction(msg):
     await msg.clear_reactions()
 
 client.run(BOT_TOKEN)
-
-# -- DISABLED FUNCTIONS --
-
-# -- ON MESSAGE EDIT EVENT --
-#     CURRENTLY DISABLED
-
-# @client.event
-# async def on_message_edit(msgb, msga):
-#     # store the msg to replace with later
-#     reverseMsgList = []
-#     charCount = 0
-#     msgStored = {
-#         "author": str(msga.author),
-#         "authorID": msga.author.id,
-#         "content": msga.content,
-#         "channel": str(msga.channel),
-#         "channelID": msga.channel.id,
-#         "msgID": msga.id,
-#         "time": float(time.mktime((msga.created_at).timetuple()) - 25200)
-#     }
-#     # i have no idea
-#     with open(MESSAGE_FILE_PATH, 'r+') as f:
-#         for line in reverse(f, batch_size=io.DEFAULT_BUFFER_SIZE):
-#             # char count is to change the position of the file cursor eventually
-#             charCount += len(line)
-#             # store the message we found
-#             reverseMsgList.insert(0, json.loads(line))
-#             # kill the for loop
-#             # death to all for loops
-#             if reverseMsgList[0].get("msgID") == msgb.id:
-#                 # seek to end of file
-#                 f.seek(0, 2)
-#                 # the one extra character is the end of file character thingy
-#                 # seek to position right at the start of the final message we logged
-#                 f.seek(f.tell() - charCount - 1, 0)
-#                 reverseMsgList.pop(0)
-#                 # store the edited message instead of the unedited one
-#                 reverseMsgList.insert(0, msgStored)
-#                 # truncate the file at that position
-#                 f.truncate()
-#                 break
-#         # write everything stored to file
-#         for line in reverseMsgList:
-#             json.dump(line, f)
-#             f.write('\n')
-
-# -- ON MESSAGE DELETE EVENT --
-#       CURRENTLY DISABLED
-
-# # this function will be have similarly to the one above, getting the message id 
-# # and then removing the associated entry in message_history.json
-# @client.event
-# async def on_message_delete(msg):
-#     reverseMsgList = []
-#     charCount = 0
-#     with open(MESSAGE_FILE_PATH, 'r+') as f:
-#         for line in reverse(f, batch_size=io.DEFAULT_BUFFER_SIZE):
-#             charCount += len(line)
-#             reverseMsgList.insert(0, json.loads(line))
-#             if reverseMsgList[0].get("msgID") == msg.id:
-#                 f.seek(0, 2)
-#                 f.seek(f.tell() - charCount - 1, 0)
-#                 reverseMsgList.pop(0)
-#                 f.truncate()
-#                 break
-#         for line in reverseMsgList:
-#             json.dump(line, f)
-#             f.write('\n')
-
-# -- ON MESSAGE BULK DELETE EVENT --
-#        CURRENTLY DISABLED
-
-# # same as function above, except made to handle a list of messages deleted at the same time
-# @client.event
-# async def on_bulk_message_delete(msgs):
-#     reverseMsgList = []
-#     reverseMsgList2 = []
-#     idList = []
-#     charCount = 0
-#     for msg in msgs:
-#         idList.append(msg.id)
-#     with open(MESSAGE_FILE_PATH, 'r+') as f:
-#         for line in reverse(f, batch_size=io.DEFAULT_BUFFER_SIZE):
-#             charCount += len(line)
-#             reverseMsgList.insert(0, json.loads(line))
-#             if reverseMsgList[0].get("msgID") == msgs[0].id:
-#                 f.seek(0, 2)
-#                 f.seek(f.tell() - charCount - 1, 0)
-#                 for msg in reverseMsgList:
-#                     if msg.get("msgID") not in idList:
-#                         reverseMsgList2.insert(0, msg)
-#                 f.truncate()
-#                 break
-#         for line in reverseMsgList2:
-#             json.dump(line, f)
-#             f.write('\n')
-#
-# -- OLD SEARCH COMMAND --
-# count = 0
-#     highestNum = 0
-#     highestAuthor = "nobody :("
-#     mostMsg = {}
-#     correction = 0
-#     if '@everyone' in phrase or '@here' in phrase:
-#         await interaction.response.send_message(f'bro you really thought? naur...')
-#         return
-#     await interaction.response.send_message(f'Searching for phrase \'{phrase}\'...')
-#     if fullwords:
-#         phrase = ' ' + phrase + ' '
-#     # to get the person with the most results for a phrase i can make a dictionarie
-#     # each key value pair will be author: num of results
-#     # at the end i can loop through to find the highest number
-#     with open(MESSAGE_FILE_PATH, 'r') as f:
-#         for line in f:
-#             x = json.loads(line)
-#             teststr = (x.get("content").endswith(phrase.casefold()[:-1]))
-#             if phrase.casefold() in str(x.get("content")).casefold() or teststr:
-#                 count += 1
-#                 if not mostMsg.get(x.get("authorID")):
-#                     mostMsg[x.get("authorID")] = 1
-#                 else:
-#                     mostMsg[x.get("authorID")] += 1
-#     for key, value in mostMsg.items():
-#         if not nobots:
-#             if client.get_user(int(key)) != None and value > highestNum and int(key) != 1256666003417469028:
-#                 highestNum = value
-#                 highestAuthor = client.get_guild(ACTIVE_SERVER).get_member(int(key)).name
-#             elif int(key) == 1256666003417469028:
-#                 correction = value
-#         else:
-#             if client.get_user(int(key)) != None and value > highestNum and not client.get_user(int(key)).bot:
-#                 highestNum = value
-#                 highestAuthor = client.get_guild(ACTIVE_SERVER).get_member(int(key)).name
-#             elif client.get_user(int(key)) != None and client.get_user(int(key)).bot:
-#                 correction += value
-#     if fullwords:
-#         phrase = phrase[1:-1]
-#     await interaction.edit_original_response(content=f'the phrase \"{phrase}\" came up {count - correction} times. it was sent the most times by {highestAuthor} with {highestNum} results.')
